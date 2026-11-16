@@ -28,6 +28,9 @@ pub struct TraditionalLayoutSystem {
     window_insertion_point: WindowInsertionPoint,
     #[serde(skip, default)]
     equalize_nodes: bool,
+    /// Kind of the root of every layout created from now on; `None` keeps the default split root.
+    #[serde(skip, default)]
+    stacked_root: Option<LayoutKind>,
 }
 
 impl Default for TraditionalLayoutSystem {
@@ -38,6 +41,7 @@ impl Default for TraditionalLayoutSystem {
             layout_roots: Default::default(),
             window_insertion_point: WindowInsertionPoint::default(),
             equalize_nodes: true,
+            stacked_root: None,
         }
     }
 }
@@ -50,8 +54,11 @@ impl TraditionalLayoutSystem {
             layout_roots: Default::default(),
             window_insertion_point,
             equalize_nodes,
+            stacked_root: None,
         }
     }
+
+    pub fn set_stacked_root(&mut self, kind: Option<LayoutKind>) { self.stacked_root = kind; }
 
     pub fn set_window_insertion_point(&mut self, value: WindowInsertionPoint) {
         self.window_insertion_point = value;
@@ -660,7 +667,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
     fn create_layout(&mut self) -> LayoutId {
         let root = OwnedNode::new_root_in(&mut self.tree, "layout_root");
-        self.layout_roots.insert(root)
+        let root_id = root.id();
+        let layout = self.layout_roots.insert(root);
+        if let Some(kind) = self.stacked_root {
+            self.set_layout(root_id, kind);
+        }
+        layout
     }
 
     fn contains_layout(&self, layout: LayoutId) -> bool { self.layout_roots.contains_key(layout) }
@@ -764,6 +776,29 @@ impl LayoutSystem for TraditionalLayoutSystem {
             return Vec::new();
         }
         parent.children(self.map()).filter_map(|node| self.window_at(node)).collect()
+    }
+
+    fn slot_focus_window(&self, layout: LayoutId, slot_node_id: u64) -> Option<WindowId> {
+        let slot = self
+            .root(layout)
+            .children(self.map())
+            .find(|child| child.data().as_ffi() == slot_node_id)?;
+        self.find_best_focus_target(slot).map(|(_, window)| window)
+    }
+
+    fn windows_to_raise_for_focus(&self, layout: LayoutId, window: WindowId) -> Vec<WindowId> {
+        let Some(node) = self.window_node(layout, window) else {
+            return Vec::new();
+        };
+        let map = self.map();
+        let mut highest_revealed = node;
+        for (ancestor, parent) in node.ancestors_with_parent(map) {
+            let Some(parent) = parent else { break };
+            if self.layout(parent).is_group() {
+                highest_revealed = ancestor;
+            }
+        }
+        self.visible_windows_under_internal(highest_revealed)
     }
 
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {

@@ -50,6 +50,11 @@ pub fn handle_command_layout(
         LayoutCommand::NextWindow
             | LayoutCommand::PrevWindow
             | LayoutCommand::MoveFocus(_)
+            | LayoutCommand::NextSibling
+            | LayoutCommand::PrevSibling
+            | LayoutCommand::NextSlot
+            | LayoutCommand::PrevSlot
+            | LayoutCommand::MoveFocusInGroup(_)
             | LayoutCommand::ToggleFocusFloating
     );
     let (is_virtual_workspace_command, is_workspace_switch, requires_workspace_space) = match cmd {

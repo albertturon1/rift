@@ -186,6 +186,16 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
     /// Members sharing the stack/group that directly contains `window`.
     fn stack_members(&self, _layout: LayoutId, _window: WindowId) -> Vec<WindowId> { Vec::new() }
+    /// The window focus lands on when it enters the top-level slot `slot_node_id` (a child of the root): the member
+    /// that slot remembers. Only the traditional tree remembers members of groups; other layouts have no answer and
+    /// the group moves fall back to Rift's own focus commands.
+    fn slot_focus_window(&self, _layout: LayoutId, _slot_node_id: u64) -> Option<WindowId> { None }
+    /// Every window that has to be raised when focus lands on `window`: the windows on screen in the outermost
+    /// stack slot that `window` belongs to, so that a slot's other members are not left behind a sibling slot.
+    /// Empty when the layout has no stacks; the caller then raises `window` alone.
+    fn windows_to_raise_for_focus(&self, _layout: LayoutId, _window: WindowId) -> Vec<WindowId> {
+        Vec::new()
+    }
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId>;
     fn ascend_selection(&mut self, layout: LayoutId) -> bool;
     fn descend_selection(&mut self, layout: LayoutId) -> bool;

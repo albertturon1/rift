@@ -463,7 +463,7 @@ fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Se
                 self.add_item(&ui, i, &title, display.display_uuid.clone(), saved);
             }
             self.menu.add_section_header("Automatic");
-            for value in ["builtin", "left", "right", "top", "bottom"] {
+            for value in ["builtin", "external", "left", "right", "top", "bottom"] {
                 let title = display_preference_title(value).unwrap_or_default();
                 self.add_item(&ui, i, title, value.into(), saved);
             }
@@ -624,6 +624,7 @@ fn workspace_display_row(f: &mut FormBuilder, model: &Rc<Model>, i: usize) -> Se
 fn display_preference_title(value: &str) -> Option<&'static str> {
     Some(match value {
         "builtin" => "Built-in Display",
+        "external" => "Any External Display",
         "left" => "Leftmost Display",
         "right" => "Rightmost Display",
         "top" => "Topmost Display",
@@ -655,6 +656,7 @@ fn edit_workspace_rule<T>(
             *property(&mut rules[index]) = Some(value);
         } else {
             let mut rule = WorkspaceLayoutRule {
+                stacked_root: None,
                 workspace: WorkspaceSelector::Name(name),
                 layout: None,
                 display: None,

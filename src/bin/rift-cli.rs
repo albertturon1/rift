@@ -193,6 +193,19 @@ enum WindowCommands {
     Next,
     /// Focus the previous window
     Prev,
+    /// Focus the next window in the same group, or the next plain top-level window outside a group (wraps)
+    NextSibling,
+    /// Focus the previous window in the same group, or the previous plain top-level window outside a group (wraps)
+    PrevSibling,
+    /// Focus the next top-level slot (a window or a group), then floating windows (wraps)
+    NextSlot,
+    /// Focus the previous top-level slot (a window or a group), then floating windows (wraps)
+    PrevSlot,
+    /// Focus by direction like `focus`, but inside a group the move stays in the group along the group's own direction
+    FocusInGroup {
+        /// Direction to focus (left, right, up, down)
+        direction: String,
+    },
     /// Focus a window by direction or by a specific window ID
     Focus {
         /// Direction to focus (left, right, up, down)
@@ -809,6 +822,17 @@ fn map_window_command(cmd: WindowCommands) -> Result<CliCommand, String> {
     match cmd {
         WindowCommands::Next => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::NextWindow))),
         WindowCommands::Prev => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::PrevWindow))),
+        WindowCommands::NextSibling => {
+            Ok(CliCommand::Reactor(reactor::Command::Layout(LC::NextSibling)))
+        }
+        WindowCommands::PrevSibling => {
+            Ok(CliCommand::Reactor(reactor::Command::Layout(LC::PrevSibling)))
+        }
+        WindowCommands::NextSlot => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::NextSlot))),
+        WindowCommands::PrevSlot => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::PrevSlot))),
+        WindowCommands::FocusInGroup { direction } => Ok(CliCommand::Reactor(
+            reactor::Command::Layout(LC::MoveFocusInGroup(parse_focus_direction(&direction)?)),
+        )),
         WindowCommands::Focus {
             direction,
             window_id,

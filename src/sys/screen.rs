@@ -104,6 +104,7 @@ pub fn resolve_display_preference<'a>(
                 && eligible(screen)
                 && match preference.as_str() {
                     "builtin" => screen.is_builtin,
+                    "external" => !screen.is_builtin,
                     "left" | "right" | "top" | "bottom" => true,
                     value => screen.display_uuid == value || screen.name.as_deref() == Some(value),
                 }
@@ -862,6 +863,8 @@ mod test {
                 (vec!["bottom"], Some("a")),
                 (vec!["d"], Some("d")),
                 (vec!["Built-in"], Some("a")),
+                (vec!["external"], Some("a")),
+                (vec!["external", "builtin"], Some("a")),
                 (vec!["missing"], None),
             ] {
                 let values = preferences.iter().map(|v| v.to_string()).collect::<Vec<_>>();
@@ -880,6 +883,17 @@ mod test {
                 "c"
             );
             assert!(resolve_display_preference(&values, &screens, |_| false).is_none());
+            let only_builtin = vec!["external".into()];
+            assert!(
+                resolve_display_preference(&only_builtin, &screens, |s| s.is_builtin).is_none()
+            );
+            let fallback = vec!["external".into(), "builtin".into()];
+            assert_eq!(
+                resolve_display_preference(&fallback, &screens, |s| s.is_builtin)
+                    .unwrap()
+                    .display_uuid,
+                "b"
+            );
             screens.rotate_left(1);
         }
     }

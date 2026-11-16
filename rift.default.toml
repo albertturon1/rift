@@ -266,6 +266,20 @@ distance_pct = 0.08
 # Haptic feedback on swipe
 haptics_enabled = true
 
+[settings.borders]
+# Let Rift drive JankyBorders (`brew install FelixKratz/formulae/borders`): it is started when it is not running and told
+# whether to draw the border before focus moves, so the border never flashes the wrong state.
+enabled = false
+style = "round"
+width = 8.0
+# Colours are 0xAARRGGBB.
+active_color = "0xff4fa84f"
+inactive_color = "0x00000000"
+# Hide the border while the focused window is in a stack, or while fewer windows than this are on screen.
+hide_in_stack = true
+min_visible_windows = 2
+# binary = "/opt/homebrew/bin/borders"
+
 # Mouse move and tiled-window drop behavior
 [settings.drag_drop]
 # Disable to leave all mouse gestures entirely to macOS and applications.
@@ -316,9 +330,10 @@ reapply_app_rules_on_title_change = false
 # Workspace rules: workspace is a zero-based index or name.
 # The last matching rule wins for each property independently.
 # - layout: "traditional", "bsp", "stack", "master_stack", "scrolling", or "floating".
-# - display: UUID, exact name, or lowercase builtin/left/right/top/bottom (global mode only).
+# - display: UUID, exact name, or lowercase builtin/external/left/right/top/bottom (global mode only).
 #   A string is one preference; lists use the first eligible match, otherwise normal placement.
-#   builtin selects the Mac's built-in panel. Directions select eligible screen-center extremes,
+#   builtin selects the Mac's built-in panel; external selects any display that is not built in (the one with the
+#   lowest UUID when there are several). Directions select eligible screen-center extremes,
 #   so preferences after a direction usually won't be reached.
 #   Explicit moves override placement until moved back or the display rule changes/reactivates.
 # workspace_rules = [
@@ -326,6 +341,7 @@ reapply_app_rules_on_title_change = false
 #   { workspace = "second", layout = "scrolling" },
 #   { workspace = 0, display = "builtin" },
 #   { workspace = 1, display = ["builtin", "right"] },
+#   { workspace = 3, display = "external" },
 #   { workspace = 2, display = ["DELL U2720Q", "left"] }
 # ]
 workspace_rules = []

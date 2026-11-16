@@ -2256,6 +2256,7 @@ pub fn render(
     if scope == Some(22) {
         snapshot.virtual_workspaces.workspace_rules.push(
             crate::common::config::WorkspaceLayoutRule {
+                stacked_root: None,
                 workspace: crate::common::config::WorkspaceSelector::Index(1),
                 layout: None,
                 display: Some(vec![

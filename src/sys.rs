@@ -20,6 +20,7 @@ pub mod gesture;
 pub mod haptics;
 pub mod hotkey;
 pub mod installed_apps;
+pub mod janky_borders;
 pub mod mach;
 pub mod observer;
 pub mod power;

@@ -63,6 +63,16 @@ pub enum LayoutCommand {
     PrevWindow,
     #[command(group = 1, label = "Focus window", order = 12)]
     MoveFocus(#[serde(rename = "direction")] Direction),
+    #[command(group = 1, label = "Focus next sibling", order = 60)]
+    NextSibling,
+    #[command(group = 1, label = "Focus previous sibling", order = 61)]
+    PrevSibling,
+    #[command(group = 1, label = "Focus next slot", order = 62)]
+    NextSlot,
+    #[command(group = 1, label = "Focus previous slot", order = 63)]
+    PrevSlot,
+    #[command(group = 1, label = "Focus within group", order = 64)]
+    MoveFocusInGroup(#[serde(rename = "direction")] Direction),
     #[command(group = 1, label = "Focus parent", order = 15)]
     Ascend,
     #[command(group = 1, label = "Focus child", order = 16)]

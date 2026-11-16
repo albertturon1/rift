@@ -476,6 +476,7 @@ mod tests {
                 s.settings.animate = true;
                 s.virtual_workspaces.workspace_names[1] = "Development".into();
                 s.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
+                    stacked_root: None,
                     workspace: WorkspaceSelector::Index(1),
                     layout: Some(LayoutMode::Scrolling),
                     display: None,

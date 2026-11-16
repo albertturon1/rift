@@ -655,6 +655,7 @@ fn edit_workspace_rule<T>(
             *property(&mut rules[index]) = Some(value);
         } else {
             let mut rule = WorkspaceLayoutRule {
+                stacked_root: None,
                 workspace: WorkspaceSelector::Name(name),
                 layout: None,
                 display: None,

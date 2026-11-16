@@ -29,6 +29,16 @@ use persistence::PersistenceState;
 pub use persistence::{RestoreReport, RestoreRequest, RestoreScope, RestoreSource};
 pub use rift_protocol::LayoutCommand;
 
+use super::group_nav::{self, GroupMove, SlotTarget};
+
+fn to_protocol_window(window: WindowId) -> rift_protocol::WindowId {
+    rift_protocol::WindowId { pid: window.pid, idx: window.idx.get() }
+}
+
+fn from_protocol_window(window: rift_protocol::WindowId) -> WindowId {
+    WindowId::new(window.pid, window.idx)
+}
+
 const SMART_FLOATING_WIDTH_RATIO: f64 = 0.8;
 const SMART_FLOATING_HEIGHT_RATIO: f64 = 0.93;
 
@@ -148,6 +158,13 @@ impl LayoutEvent {
 }
 
 #[must_use]
+/// See [`LayoutEngine::border_state`].
+pub(crate) struct BorderState {
+    pub tree: rift_protocol::ContainerTreeNode,
+    pub floating: Vec<rift_protocol::WindowId>,
+    pub focused: Option<rift_protocol::WindowId>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EventResponse {
     /// Whether handling the request changed layout-engine state.
@@ -968,6 +985,103 @@ impl LayoutEngine {
                     && self.workspaces.is_window_in_active_workspace(window_store, space, *wid)
             })
             .collect()
+    }
+
+    /// A window that can take focus now: not minimized, not hidden with its app, on the active workspace.
+    fn is_focusable(&self, window_store: &WindowStore, space: SpaceId, window: WindowId) -> bool {
+        !window_store.is_temporarily_unavailable(window)
+            && self.workspaces.is_window_in_active_workspace(window_store, space, window)
+    }
+
+    /// What the borders decision needs for the active workspace of `space`: the tree without windows that cannot
+    /// take focus, the visible floating windows, and the window focus is on or is about to land on. The engine's
+    /// focus leads the real one during a focus command, which is what lets the border be set before focus moves.
+    pub(crate) fn border_state(
+        &self,
+        window_store: &WindowStore,
+        space: SpaceId,
+    ) -> Option<BorderState> {
+        let (workspace_id, layout) = self.workspaces.active_layout_for_space(space)?;
+        let tree = self.focusable_tree(window_store, space, workspace_id, layout);
+        let floating: Vec<_> = self
+            .active_floating_windows_in_workspace(window_store, space)
+            .into_iter()
+            .map(to_protocol_window)
+            .collect();
+        let known = |window: rift_protocol::WindowId| {
+            floating.contains(&window) || group_nav::contains_window(&tree, window)
+        };
+        let focused = self
+            .focused_window
+            .map(to_protocol_window)
+            .filter(|window| known(*window))
+            .or_else(|| group_nav::selected_window(&tree));
+        Some(BorderState { tree, floating, focused })
+    }
+
+    /// The layout tree without the windows that cannot take focus (see `group_nav`).
+    fn focusable_tree(
+        &self,
+        window_store: &WindowStore,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+        layout: LayoutId,
+    ) -> rift_protocol::ContainerTreeNode {
+        let tree = self.workspaces[workspace_id].layout_system.container_tree(layout);
+        group_nav::prune(&tree, self.focused_window.map(to_protocol_window), &|window| {
+            self.is_focusable(window_store, space, from_protocol_window(window))
+        })
+    }
+
+    /// End fullscreen on the selected window, as AeroSpace does when focus leaves it. Rift keeps the flag and
+    /// would draw the newly focused window at its tile size on top of the fullscreen one.
+    fn exit_fullscreen_of_selection(
+        &mut self,
+        workspace_id: VirtualWorkspaceId,
+        layout: LayoutId,
+        tree: &rift_protocol::ContainerTreeNode,
+    ) {
+        let (full, within_gaps) = group_nav::selected_fullscreen(tree);
+        let system = &mut self.workspaces[workspace_id].layout_system;
+        if full {
+            system.toggle_fullscreen_of_selection(layout);
+        }
+        if within_gaps {
+            system.toggle_fullscreen_within_gaps_of_selection(layout);
+        }
+    }
+
+    /// Focus `target` after a group move: leave fullscreen on the window being left, select and raise the target.
+    fn focus_after_group_move(
+        &mut self,
+        window_store: &mut WindowStore,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+        layout: LayoutId,
+        tree: &rift_protocol::ContainerTreeNode,
+        target: WindowId,
+        was_floating: bool,
+    ) -> EventResponse {
+        if !was_floating {
+            self.exit_fullscreen_of_selection(workspace_id, layout, tree);
+        }
+        let mut response = EventResponse {
+            changed: true,
+            focus_window: Some(target),
+            raise_windows: vec![target],
+            boundary_hit: None,
+            ..EventResponse::default()
+        };
+        self.apply_focus_response(window_store, space, workspace_id, layout, &response);
+        // Selected first, so a stack slot reveals the member that was just chosen.
+        let revealed = self.workspaces[workspace_id]
+            .layout_system
+            .windows_to_raise_for_focus(layout, target);
+        let revealed = self.filter_active_workspace_windows(window_store, space, revealed);
+        if !revealed.is_empty() {
+            response.raise_windows = revealed;
+        }
+        response
     }
 
     fn filter_active_workspace_window(
@@ -2343,6 +2457,11 @@ impl LayoutEngine {
             LayoutCommand::NextWindow
                 | LayoutCommand::PrevWindow
                 | LayoutCommand::MoveFocus(_)
+                | LayoutCommand::NextSibling
+                | LayoutCommand::PrevSibling
+                | LayoutCommand::NextSlot
+                | LayoutCommand::PrevSlot
+                | LayoutCommand::MoveFocusInGroup(_)
                 | LayoutCommand::ToggleFocusFloating
                 | LayoutCommand::Ascend
                 | LayoutCommand::Descend
@@ -2647,6 +2766,105 @@ impl LayoutEngine {
                     };
                     self.apply_focus_response(window_store, space, workspace_id, layout, &response);
                     return response;
+                }
+            }
+            LayoutCommand::NextSibling | LayoutCommand::PrevSibling => {
+                if is_floating {
+                    return EventResponse::default(); // a floating window is never in a group
+                }
+                let tree = self.focusable_tree(window_store, space, workspace_id, layout);
+                let forward = matches!(command, LayoutCommand::NextSibling);
+                return match group_nav::sibling_target(&tree, forward).map(from_protocol_window) {
+                    Some(target) if Some(target) != self.focused_window => self
+                        .focus_after_group_move(
+                            window_store,
+                            space,
+                            workspace_id,
+                            layout,
+                            &tree,
+                            target,
+                            false,
+                        ),
+                    _ => EventResponse::default(),
+                };
+            }
+            LayoutCommand::NextSlot | LayoutCommand::PrevSlot => {
+                let forward = matches!(command, LayoutCommand::NextSlot);
+                let tree = self.focusable_tree(window_store, space, workspace_id, layout);
+                let floating: Vec<_> = self
+                    .active_floating_windows_in_workspace(window_store, space)
+                    .into_iter()
+                    .map(to_protocol_window)
+                    .collect();
+                let focus = self.focused_window.map(to_protocol_window);
+                let target = match group_nav::slot_target(&tree, &floating, focus, forward) {
+                    None => return EventResponse::default(),
+                    Some(SlotTarget::Floating(window)) => from_protocol_window(window),
+                    Some(SlotTarget::Slot(slot_id)) => {
+                        let Some(slot) = tree.children.iter().find(|c| c.node_id == slot_id) else {
+                            return EventResponse::default();
+                        };
+                        let remembered = self.workspaces[workspace_id]
+                            .layout_system
+                            .slot_focus_window(layout, slot_id)
+                            .filter(|window| self.is_focusable(window_store, space, *window));
+                        let Some(window) = remembered
+                            .or_else(|| group_nav::first_window(slot).map(from_protocol_window))
+                        else {
+                            return EventResponse::default();
+                        };
+                        window
+                    }
+                };
+                return self.focus_after_group_move(
+                    window_store,
+                    space,
+                    workspace_id,
+                    layout,
+                    &tree,
+                    target,
+                    is_floating,
+                );
+            }
+            LayoutCommand::MoveFocusInGroup(direction) => {
+                if is_floating {
+                    return EventResponse::default();
+                }
+                let tree = self.focusable_tree(window_store, space, workspace_id, layout);
+                match group_nav::decide_move(&tree, direction) {
+                    GroupMove::Stay => return EventResponse::default(),
+                    GroupMove::Wrap(target) => {
+                        let target = from_protocol_window(target);
+                        if Some(target) == self.focused_window {
+                            return EventResponse::default();
+                        }
+                        return self.focus_after_group_move(
+                            window_store,
+                            space,
+                            workspace_id,
+                            layout,
+                            &tree,
+                            target,
+                            false,
+                        );
+                    }
+                    GroupMove::Native => {
+                        if self.workspaces[workspace_id]
+                            .layout_system
+                            .window_in_direction(layout, direction)
+                            .is_some()
+                        {
+                            self.exit_fullscreen_of_selection(workspace_id, layout, &tree);
+                        }
+                        return self.move_focus_internal(
+                            window_store,
+                            space,
+                            visible_spaces,
+                            visible_space_frames,
+                            direction,
+                            is_floating,
+                        );
+                    }
                 }
             }
             LayoutCommand::MoveFocus(direction) => {
@@ -4977,6 +5195,7 @@ mod tests {
     fn tiled_app_rule_size_sets_scrolling_column_width() {
         let mut settings = VirtualWorkspaceSettings::default();
         settings.workspace_rules = vec![WorkspaceLayoutRule {
+            stacked_root: None,
             workspace: WorkspaceSelector::Index(0),
             layout: Some(LayoutMode::Scrolling),
             display: None,
@@ -5407,6 +5626,7 @@ mod tests {
     fn scrolling_layout_preserves_vertical_cross_display_focus() {
         let mut settings = VirtualWorkspaceSettings::default();
         settings.workspace_rules = vec![WorkspaceLayoutRule {
+            stacked_root: None,
             workspace: WorkspaceSelector::Index(0),
             layout: Some(LayoutMode::Scrolling),
             display: None,
@@ -5480,6 +5700,7 @@ mod tests {
 
         let mut settings = VirtualWorkspaceSettings::default();
         settings.workspace_rules = vec![WorkspaceLayoutRule {
+            stacked_root: None,
             workspace: WorkspaceSelector::Name(workspace_name),
             layout: Some(LayoutMode::Scrolling),
             display: None,
@@ -5508,6 +5729,7 @@ mod tests {
             layouts.mode = LayoutMode::Stack;
             if let Some(layout) = rule_layout {
                 settings.workspace_rules.push(WorkspaceLayoutRule {
+                    stacked_root: None,
                     workspace: WorkspaceSelector::Index(0),
                     layout: Some(layout),
                     display: None,

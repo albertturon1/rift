@@ -3991,6 +3991,8 @@ fn same_app_native_focus_respects_auto_switch_guards() {
         apps.simulate_until_quiet(&mut reactor);
         let workspace = reactor.test_workspace(space, 1);
         assert!(reactor.assign_test_window_to_workspace(space, hidden, workspace));
+        // Accessibility already names the hidden window, so only the guard can stop the switch.
+        reactor.handle_event(Event::ApplicationMainWindowChanged(2, Some(hidden), Quiet::No));
         match guard {
             "blacklist" => reactor.config.settings.auto_focus_blacklist.push("com.testapp2".into()),
             "wake" => reactor.handle_event(Event::SystemWoke),
@@ -4052,6 +4054,132 @@ fn same_app_native_focus_respects_auto_switch_guards() {
             "{guard} must not arrange hidden windows"
         );
     }
+}
+
+#[test]
+fn same_app_focus_handoff_that_accessibility_does_not_confirm_keeps_the_workspace() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let fullscreen = WindowId::new(2, 1);
+    let other = WindowId::new(2, 2);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 2, make_windows(2));
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    reactor.handle_event(Event::ApplicationMainWindowChanged(2, Some(fullscreen), Quiet::No));
+    reactor.handle_event(Event::WindowServerFocusChanged(fullscreen, space));
+    apps.simulate_until_quiet(&mut reactor);
+    let workspace = reactor.test_workspace(space, 1);
+    assert!(reactor.assign_test_window_to_workspace(space, other, workspace));
+    let active = |reactor: &Reactor| {
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space)
+    };
+
+    // A window enters native fullscreen: macOS reports the app's other window as focused,
+    // while Accessibility keeps naming the fullscreen window.
+    reactor.handle_event(Event::WindowServerFocusChanged(other, space));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(active(&reactor), Some(0), "an unconfirmed hand-over must not switch workspace");
+    assert_eq!(reactor.unconfirmed_same_app_focus, Some(other));
+
+    // macOS hands focus back; a late Accessibility event about the other window changes nothing.
+    reactor.handle_event(Event::WindowServerFocusChanged(fullscreen, space));
+    assert_eq!(reactor.unconfirmed_same_app_focus, None);
+    reactor.handle_event(Event::ApplicationMainWindowChanged(2, Some(other), Quiet::No));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(active(&reactor), Some(0));
+}
+
+#[test]
+fn same_app_focus_follows_as_soon_as_accessibility_confirms_it() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let first = WindowId::new(2, 1);
+    let second = WindowId::new(2, 2);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 2, make_windows(2));
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    reactor.handle_event(Event::ApplicationMainWindowChanged(2, Some(first), Quiet::No));
+    reactor.handle_event(Event::WindowServerFocusChanged(first, space));
+    apps.simulate_until_quiet(&mut reactor);
+    let workspace = reactor.test_workspace(space, 1);
+    assert!(reactor.assign_test_window_to_workspace(space, second, workspace));
+
+    // The user switches windows: WindowServer is first, Accessibility follows moments later.
+    reactor.handle_event(Event::WindowServerFocusChanged(second, space));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+        Some(0)
+    );
+    reactor.handle_event(Event::ApplicationMainWindowChanged(2, Some(second), Quiet::No));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space),
+        Some(1)
+    );
+    assert_eq!(reactor.unconfirmed_same_app_focus, None);
+}
+
+#[test]
+fn reparking_a_shown_hidden_window_ignores_frames_remembered_from_earlier_spaces() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let hidden = WindowId::new(2, 2);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 2, make_windows(2));
+    let workspace = reactor.test_workspace(space, 1);
+    assert!(reactor.assign_test_window_to_workspace(space, hidden, workspace));
+    // A native fullscreen space or an old, larger display layout left a frame that covers this screen.
+    reactor
+        .last_screen_frames
+        .insert(SpaceId::new(9), CGRect::new(CGPoint::ZERO, CGSize::new(1400., 1400.)));
+    let screen_frame = reactor.last_screen_frames[&space];
+    let frame = reactor.state.windows.window(hidden).unwrap().frame_monotonic;
+    let expected = crate::model::HiddenWindowPlacement::calculate(
+        screen_frame,
+        frame,
+        crate::model::HideCorner::BottomRight,
+        &[],
+    );
+
+    let outcome = reactor.repark_shown_inactive_window(reactor.test_window_server_id(hidden));
+
+    let parked: Vec<_> = outcome
+        .app_requests
+        .iter()
+        .filter_map(|(_, request)| match request {
+            Request::SetWindowFrames(frames, ..) => frames.first().map(|(_, frame)| *frame),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(parked, vec![expected], "the window is parked in the bottom right corner");
+}
+
+#[test]
+fn repeated_server_focus_on_the_same_window_still_waits_for_accessibility() {
+    // After native fullscreen ends WindowServer may never report focus returning to the fullscreen window, so the
+    // other window stays the last known native focus. A deliberate switch to it then repeats that same focus event.
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.));
+    let first = WindowId::new(2, 1);
+    let second = WindowId::new(2, 2);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 2, make_windows(2));
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    reactor.handle_event(Event::ApplicationMainWindowChanged(2, Some(first), Quiet::No));
+    reactor.handle_event(Event::WindowServerFocusChanged(first, space));
+    apps.simulate_until_quiet(&mut reactor);
+    let workspace = reactor.test_workspace(space, 1);
+    assert!(reactor.assign_test_window_to_workspace(space, second, workspace));
+
+    // The hand-over during fullscreen: WindowServer names the other window, Accessibility does not.
+    reactor.handle_event(Event::WindowServerFocusChanged(second, space));
+    assert_eq!(reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space), Some(0));
+    // The user then raises that window: the same focus event again, then Accessibility agrees.
+    reactor.handle_event(Event::WindowServerFocusChanged(second, space));
+    assert_eq!(reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space), Some(0));
+    reactor.handle_event(Event::ApplicationMainWindowChanged(2, Some(second), Quiet::No));
+    apps.simulate_until_quiet(&mut reactor);
+    assert_eq!(reactor.layout_manager.layout_engine.workspaces().active_workspace_idx(space), Some(1));
 }
 
 #[test]
@@ -9938,6 +10066,7 @@ fn shared_destroyed_desktop_evacuates_even_when_its_display_stays_connected() {
     let (mut apps, mut reactor, ids, wsids) = shared_two_display_fixture();
     let mut config = reactor.config.clone();
     config.virtual_workspaces.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
+        stacked_root: None,
         workspace: WorkspaceSelector::Index(2),
         layout: None,
         display: Some(vec!["test-display-1".into()]),
@@ -10155,6 +10284,7 @@ fn shared_fullscreen_exit_needs_native_evidence_and_follows_its_workspace() {
     // A pin moves the workspace to the laptop while its member is fullscreen.
     let mut config = reactor.config.clone();
     config.virtual_workspaces.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
+        stacked_root: None,
         workspace: WorkspaceSelector::Index(0),
         layout: None,
         display: Some(vec!["test-display-0".into()]),
@@ -10635,6 +10765,7 @@ fn shared_mode_opens_new_windows_on_the_pointer_display() {
 fn shared_move_workspace_to_display_moves_a_rule_bound_workspace_and_suspends_the_rule() {
     let mut settings = shared_settings();
     settings.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
+        stacked_root: None,
         workspace: WorkspaceSelector::Index(0),
         layout: None,
         display: Some(vec!["test-display-0".into(), "right".into()]),
@@ -10703,6 +10834,7 @@ fn shared_destroyed_dormant_desktop_releases_ownership_without_rebuilding_catalo
 fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() {
     let mut settings = shared_settings();
     settings.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
+        stacked_root: None,
         workspace: WorkspaceSelector::Index(0),
         layout: None,
         display: Some(vec!["offline-pin".into()]),
@@ -10736,6 +10868,7 @@ fn shared_explicit_move_overrides_an_unavailable_pin_across_reload_and_return() 
 
     let pin = reactor.config.virtual_workspaces.workspace_rules[0].clone();
     let layout = crate::common::config::WorkspaceLayoutRule {
+        stacked_root: None,
         workspace: WorkspaceSelector::Name(workspace.name.clone()),
         layout: Some(LayoutMode::Stack),
         display: None,
@@ -10773,6 +10906,7 @@ fn connecting_display_applies_named_pin_after_disambiguating_native_workspaces()
     settings.default_workspace_count = 1;
     settings.workspace_names = vec!["Code".into()];
     settings.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
+        stacked_root: None,
         workspace: WorkspaceSelector::Name("Code".into()),
         layout: None,
         display: Some(vec!["test-display-1".into()]),
@@ -10831,6 +10965,7 @@ fn named_pin_reload_moves_immediately_without_growing_catalog() {
         settings.default_workspace_count = 2;
         settings.workspace_names = vec!["a".into(), "d".into()];
         settings.workspace_rules = vec![crate::common::config::WorkspaceLayoutRule {
+            stacked_root: None,
             workspace: WorkspaceSelector::Name("d".into()),
             layout: Some(LayoutMode::Bsp),
             display: Some(vec!["test-display-1".into()]),
@@ -12269,5 +12404,404 @@ fn presentation_inventory_tracks_visibility_without_forgetting_layout() {
         reactor.handle_event(Event::WindowDestroyed(wid));
         assert!(reactor.query_window_info(wid).is_none());
         assert!(!reactor.state.windows.contains_window(wid));
+    }
+}
+
+mod group_focus_commands {
+    use test_log::test;
+
+    use super::*;
+
+    const PID: pid_t = 2;
+    // The row is `[A [X Y] B]`. Windows are added in front of each other, so the tree order is 1 4 3 2.
+    const A: u32 = 1;
+    const X: u32 = 4;
+    const Y: u32 = 3;
+    const B: u32 = 2;
+
+    fn window(idx: u32) -> WindowId { WindowId::new(PID, idx) }
+
+    fn state(reactor: &Reactor) -> rift_protocol::LayoutStateData {
+        reactor.query_layout_state(None, None).unwrap()
+    }
+
+    fn selected(reactor: &Reactor) -> Option<u32> { state(reactor).selected_window.map(|w| w.idx) }
+
+    fn run(reactor: &mut Reactor, command: LayoutCommand) {
+        reactor.handle_event(Event::Command(Command::Layout(command)));
+    }
+
+    fn focus(reactor: &mut Reactor, space: SpaceId, idx: u32) {
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, window(idx)));
+    }
+
+    fn shape(node: &rift_protocol::ContainerTreeNode) -> String {
+        match node.window_id {
+            Some(w) => w.idx.to_string(),
+            None => format!("[{}]", node.children.iter().map(shape).collect::<Vec<_>>().join(" ")),
+        }
+    }
+
+    fn fullscreen_flag(reactor: &Reactor, idx: u32) -> bool {
+        fn find(node: &rift_protocol::ContainerTreeNode, idx: u32) -> Option<bool> {
+            if node.window_id.is_some_and(|w| w.idx == idx) {
+                return Some(node.is_fullscreen);
+            }
+            node.children.iter().find_map(|child| find(child, idx))
+        }
+        find(&state(reactor).container_tree, idx).unwrap()
+    }
+
+    fn row_with_group() -> (Apps, Reactor, SpaceId) {
+        let (mut apps, mut reactor) = test_context();
+        let space = SpaceId::new(1);
+        let frame = CGRect::new(CGPoint::ZERO, CGSize::new(2000., 1000.));
+        reactor.handle_event(space_state_event(vec![frame], vec![Some(space)]));
+        apps.make_app_and_settle(&mut reactor, PID, make_windows(4));
+        focus(&mut reactor, space, X);
+        run(&mut reactor, LayoutCommand::JoinWindow(Direction::Right));
+        focus(&mut reactor, space, A);
+        assert_eq!(shape(&state(&reactor).container_tree), format!("[{A} [{X} {Y}] {B}]"));
+        (apps, reactor, space)
+    }
+
+    #[test]
+    fn sibling_slot_and_group_moves_follow_the_group_rules() {
+        let (_apps, mut reactor, space) = row_with_group();
+        // Next sibling next to a group stays among the plain windows: A -> B -> A.
+        run(&mut reactor, LayoutCommand::NextSibling);
+        assert_eq!(selected(&reactor), Some(B));
+        run(&mut reactor, LayoutCommand::NextSibling);
+        assert_eq!(selected(&reactor), Some(A));
+        // Next slot enters the group at the member it remembers, then walks on and wraps.
+        focus(&mut reactor, space, Y);
+        focus(&mut reactor, space, A);
+        run(&mut reactor, LayoutCommand::NextSlot);
+        assert_eq!(selected(&reactor), Some(Y), "the group remembers its last focused member");
+        run(&mut reactor, LayoutCommand::NextSlot);
+        assert_eq!(selected(&reactor), Some(B));
+        run(&mut reactor, LayoutCommand::NextSlot);
+        assert_eq!(selected(&reactor), Some(A), "past the last slot it wraps to the first");
+        run(&mut reactor, LayoutCommand::PrevSlot);
+        assert_eq!(selected(&reactor), Some(B));
+        // Inside the group sibling moves swap the two members and left/right wrap at the edges.
+        focus(&mut reactor, space, X);
+        run(&mut reactor, LayoutCommand::NextSibling);
+        assert_eq!(selected(&reactor), Some(Y));
+        run(&mut reactor, LayoutCommand::MoveFocusInGroup(Direction::Right));
+        assert_eq!(selected(&reactor), Some(X), "right at the last member wraps to the first");
+        run(&mut reactor, LayoutCommand::MoveFocusInGroup(Direction::Left));
+        assert_eq!(selected(&reactor), Some(Y), "left at the first member wraps to the last");
+        // Outside a group a directional press does nothing.
+        focus(&mut reactor, space, A);
+        for direction in [Direction::Left, Direction::Right, Direction::Up, Direction::Down] {
+            run(&mut reactor, LayoutCommand::MoveFocusInGroup(direction));
+            assert_eq!(selected(&reactor), Some(A));
+        }
+    }
+
+    #[test]
+    fn minimized_windows_are_never_focused_by_group_moves() {
+        let (_apps, mut reactor, space) = row_with_group();
+        reactor.handle_event(Event::WindowMinimized(window(Y)));
+        focus(&mut reactor, space, X);
+        // The group has one usable member left: nothing to move to, focus never reaches the minimized one.
+        run(&mut reactor, LayoutCommand::NextSibling);
+        assert_eq!(selected(&reactor), Some(X));
+        run(&mut reactor, LayoutCommand::MoveFocusInGroup(Direction::Right));
+        assert_eq!(selected(&reactor), Some(X), "the group wraps onto itself, not onto the minimized window");
+        // Plain windows skip a minimized neighbour as well.
+        reactor.handle_event(Event::WindowMinimized(window(B)));
+        focus(&mut reactor, space, A);
+        run(&mut reactor, LayoutCommand::NextSibling);
+        assert_eq!(selected(&reactor), Some(A), "B is minimized and A has no other plain window");
+        run(&mut reactor, LayoutCommand::NextSlot);
+        assert_eq!(selected(&reactor), Some(X));
+    }
+
+    #[test]
+    fn a_group_move_ends_fullscreen_on_the_window_it_leaves() {
+        let (_apps, mut reactor, _space) = row_with_group();
+        run(&mut reactor, LayoutCommand::ToggleFullscreen);
+        assert!(fullscreen_flag(&reactor, A));
+        run(&mut reactor, LayoutCommand::NextSibling);
+        assert_eq!(selected(&reactor), Some(B));
+        assert!(!fullscreen_flag(&reactor, A), "A left fullscreen when focus moved");
+    }
+
+    #[test]
+    fn a_move_with_nowhere_to_go_keeps_fullscreen() {
+        let (_apps, mut reactor, _space) = row_with_group();
+        run(&mut reactor, LayoutCommand::ToggleFullscreen);
+        run(&mut reactor, LayoutCommand::MoveFocusInGroup(Direction::Left));
+        assert!(fullscreen_flag(&reactor, A), "a directional press outside a group moves nothing");
+        assert_eq!(selected(&reactor), Some(A));
+    }
+
+    #[test]
+    fn entering_a_side_by_side_group_in_a_stacked_row_raises_all_its_members() {
+        // Row `[A [X Y]]` with the row itself an accordion: only the front slot is on top of the other one, so a
+        // move into the group has to raise every member, not just the one that gets focus. Raising only the focused
+        // member left the other one hidden behind A.
+        let (mut apps, mut reactor) = test_context();
+        let space = SpaceId::new(1);
+        let frame = CGRect::new(CGPoint::ZERO, CGSize::new(2000., 1000.));
+        reactor.handle_event(space_state_event(vec![frame], vec![Some(space)]));
+        apps.make_app_and_settle(&mut reactor, PID, make_windows(3));
+        focus(&mut reactor, space, 3);
+        run(&mut reactor, LayoutCommand::JoinWindow(Direction::Right));
+        focus(&mut reactor, space, 1);
+        run(&mut reactor, LayoutCommand::ToggleStack);
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(selected(&reactor), Some(1));
+        let (raise_tx, mut raise_rx) = actor::channel();
+        reactor.communication_manager.raise_manager_tx = raise_tx;
+        run(&mut reactor, LayoutCommand::NextSlot);
+        assert_eq!(selected(&reactor), Some(3));
+        let (_, raise_manager::Event::RaiseRequest(request)) =
+            raise_rx.try_recv().expect("a raise request")
+        else {
+            panic!("expected a raise request");
+        };
+        let mut raised: Vec<u32> =
+            request.raise_windows.iter().flatten().map(|w| w.idx.get()).collect();
+        raised.extend(request.focus_window.map(|(w, _)| w.idx.get()));
+        assert!(
+            raised.contains(&2) && raised.contains(&3),
+            "both group members must be raised, got {raised:?}"
+        );
+    }
+}
+
+mod native_borders {
+    use std::sync::{Arc, Mutex};
+
+    use test_log::test;
+
+    use super::*;
+    use crate::actor::reactor::borders::BordersController;
+    use crate::sys::janky_borders::{BordersClient, SendError};
+
+    const PID: pid_t = 2;
+
+    #[derive(Default)]
+    struct Log {
+        sent: Vec<Vec<String>>,
+        started: Vec<(Vec<String>, Vec<String>)>,
+        running: bool,
+    }
+
+    struct Recorder(Arc<Mutex<Log>>);
+
+    impl BordersClient for Recorder {
+        fn send(&mut self, args: &[String]) -> Result<(), SendError> {
+            let mut log = self.0.lock().unwrap();
+            if log.running {
+                log.sent.push(args.to_vec());
+                Ok(())
+            } else {
+                Err(SendError::NotRunning)
+            }
+        }
+
+        fn start(&mut self, initial: &[String], then: &[String]) {
+            let mut log = self.0.lock().unwrap();
+            log.started.push((initial.to_vec(), then.to_vec()));
+            log.running = true;
+        }
+    }
+
+    fn shown(args: &[String]) -> bool { !args.iter().any(|a| a == "active_color=0x00000000") }
+
+    fn last_shown(log: &Arc<Mutex<Log>>) -> Option<bool> {
+        log.lock().unwrap().sent.last().map(|args| shown(args))
+    }
+
+    fn run(reactor: &mut Reactor, command: LayoutCommand) {
+        reactor.handle_event(Event::Command(Command::Layout(command)));
+    }
+
+    fn focus(reactor: &mut Reactor, space: SpaceId, idx: u32) {
+        reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(PID, idx)));
+    }
+
+    /// The window server / Accessibility report that focus has really arrived on `idx`.
+    fn land(reactor: &mut Reactor, idx: u32) {
+        reactor.handle_event(Event::ApplicationMainWindowChanged(
+            PID,
+            Some(WindowId::new(PID, idx)),
+            Quiet::No,
+        ));
+    }
+
+    /// `[1 [3 2]]` with the group `[3 2]` an accordion, on a wide screen. Window 1 is a plain slot.
+    fn plain_slot_and_stacked_group(enabled: bool) -> (Apps, Reactor, SpaceId, Arc<Mutex<Log>>) {
+        let (mut apps, mut reactor) = test_context();
+        reactor.config.settings.borders.enabled = enabled;
+        let log = Arc::new(Mutex::new(Log { running: true, ..Log::default() }));
+        reactor.borders = BordersController::with_client(Box::new(Recorder(log.clone())));
+        let space = SpaceId::new(1);
+        let frame = CGRect::new(CGPoint::ZERO, CGSize::new(2000., 1000.));
+        reactor.handle_event(space_state_event(vec![frame], vec![Some(space)]));
+        make_active_app(&mut apps, &mut reactor, PID, make_windows(3), Some(WindowId::new(PID, 3)));
+        focus(&mut reactor, space, 3);
+        run(&mut reactor, LayoutCommand::JoinWindow(Direction::Right));
+        run(&mut reactor, LayoutCommand::ToggleStack);
+        apps.simulate_until_quiet(&mut reactor);
+        (apps, reactor, space, log)
+    }
+
+    #[test]
+    fn hiding_is_immediate_but_showing_waits_until_focus_has_landed() {
+        let (_apps, mut reactor, space, log) = plain_slot_and_stacked_group(true);
+        focus(&mut reactor, space, 1);
+        // Real focus on window 1 first, so the border starts in the shown state.
+        land(&mut reactor, 1);
+        assert_eq!(last_shown(&log), Some(true));
+        run(&mut reactor, LayoutCommand::NextSlot);
+        // Focus is heading into the stacked group: hidden, decided inside that very command, before the window
+        // server or Accessibility could report the new focus.
+        assert_eq!(last_shown(&log), Some(false), "entering a stack hides the border at once");
+        land(&mut reactor, 3);
+        run(&mut reactor, LayoutCommand::NextSlot);
+        // Heading back to the plain slot: the decision is "shown", but the real focus is still in the group. A shown
+        // border now would be drawn around the window focus is leaving (a visible flash), so it is held back.
+        assert_eq!(last_shown(&log), Some(false), "a shown border waits for the real focus: {:?}", log.lock().unwrap().sent);
+        land(&mut reactor, 1);
+        assert_eq!(last_shown(&log), Some(true), "once focus has landed the border is shown");
+    }
+
+    #[test]
+    fn nothing_is_sent_while_borders_are_disabled() {
+        let (_apps, mut reactor, space, log) = plain_slot_and_stacked_group(false);
+        focus(&mut reactor, space, 1);
+        run(&mut reactor, LayoutCommand::NextSlot);
+        run(&mut reactor, LayoutCommand::NextSlot);
+        assert!(log.lock().unwrap().sent.is_empty());
+        assert!(log.lock().unwrap().started.is_empty());
+    }
+
+    #[test]
+    fn jankyborders_is_started_visible_and_then_told_the_decision_when_it_is_not_running() {
+        let (_apps, mut reactor, space, log) = plain_slot_and_stacked_group(true);
+        focus(&mut reactor, space, 1);
+        land(&mut reactor, 1);
+        {
+            let mut log = log.lock().unwrap();
+            log.running = false;
+            log.sent.clear();
+            log.started.clear();
+        }
+        // Focus goes from the plain slot into the stacked group, which hides the border.
+        run(&mut reactor, LayoutCommand::NextSlot);
+        let log_now = log.lock().unwrap();
+        assert_eq!(log_now.started.len(), 1);
+        let (initial, then) = &log_now.started[0];
+        assert!(shown(initial), "a JankyBorders started with only transparent colours never draws: {initial:?}");
+        assert!(!shown(then), "the decision (hidden) follows once it is up: {then:?}");
+        drop(log_now);
+        land(&mut reactor, 3);
+        run(&mut reactor, LayoutCommand::NextSlot);
+        land(&mut reactor, 1);
+        assert_eq!(log.lock().unwrap().started.len(), 1, "never a second copy");
+        assert!(!log.lock().unwrap().sent.is_empty());
+    }
+
+    #[test]
+    fn a_one_window_workspace_never_shows_the_border_first() {
+        // Workspace 0 holds two windows (border shown), workspace 1 one window (hidden). The border must be set
+        // before the switch moves any window, so the single window never appears with the border and loses it.
+        let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+        reactor.config.settings.borders.enabled = true;
+        let log = Arc::new(Mutex::new(Log { running: true, ..Log::default() }));
+        reactor.borders = BordersController::with_client(Box::new(Recorder(log.clone())));
+        let space = SpaceId::new(1);
+        let frame = CGRect::new(CGPoint::ZERO, CGSize::new(2000., 1000.));
+        reactor.handle_event(space_state_event(vec![frame], vec![Some(space)]));
+        make_active_app(&mut apps, &mut reactor, PID, make_windows(3), Some(WindowId::new(PID, 1)));
+        let second = reactor.test_workspace(space, 1);
+        assert!(reactor.assign_test_window_to_workspace(space, WindowId::new(PID, 3), second));
+        apps.simulate_until_quiet(&mut reactor);
+
+        reactor.event_outcome_phase_trace.clear();
+        reactor.border_sync_trace.clear();
+        run(&mut reactor, LayoutCommand::SwitchToWorkspace(1));
+        assert_eq!(
+            reactor.border_sync_trace.first(),
+            Some(&(0, false)),
+            "hidden is decided before any outcome phase (window moves) ran: {:?}",
+            reactor.border_sync_trace
+        );
+        assert_eq!(last_shown(&log), Some(false));
+
+        reactor.event_outcome_phase_trace.clear();
+        reactor.border_sync_trace.clear();
+        run(&mut reactor, LayoutCommand::SwitchToWorkspace(0));
+        assert_eq!(reactor.border_sync_trace.first(), Some(&(0, true)));
+        assert_eq!(last_shown(&log), Some(true));
+    }
+
+    #[test]
+    fn a_side_by_side_group_under_a_stacked_row_shows_the_border_and_the_plain_slot_hides_it() {
+        // The user's workspace W: the root is an accordion with a plain slot and a slot holding two windows side by
+        // side. Focus in the group: two windows are visible, the focused one is not in a stack: shown. Focus on the
+        // plain slot: it is in the accordion: hidden.
+        let (mut apps, mut reactor) = test_context();
+        reactor.config.settings.borders.enabled = true;
+        let log = Arc::new(Mutex::new(Log { running: true, ..Log::default() }));
+        reactor.borders = BordersController::with_client(Box::new(Recorder(log.clone())));
+        let space = SpaceId::new(1);
+        let frame = CGRect::new(CGPoint::ZERO, CGSize::new(2000., 1000.));
+        reactor.handle_event(space_state_event(vec![frame], vec![Some(space)]));
+        make_active_app(&mut apps, &mut reactor, PID, make_windows(3), Some(WindowId::new(PID, 3)));
+        focus(&mut reactor, space, 3);
+        run(&mut reactor, LayoutCommand::JoinWindow(Direction::Right));
+        focus(&mut reactor, space, 1);
+        run(&mut reactor, LayoutCommand::ToggleStack);
+        apps.simulate_until_quiet(&mut reactor);
+        land(&mut reactor, 1);
+        run(&mut reactor, LayoutCommand::NextSlot);
+        apps.simulate_until_quiet(&mut reactor);
+        let target = reactor.query_layout_state(None, None).unwrap().selected_window.unwrap().idx;
+        land(&mut reactor, target);
+        assert_eq!(last_shown(&log), Some(true), "sent: {:?} trace: {:?}", log.lock().unwrap().sent, reactor.border_sync_trace);
+        run(&mut reactor, LayoutCommand::NextSlot);
+        apps.simulate_until_quiet(&mut reactor);
+        assert_eq!(last_shown(&log), Some(false));
+    }
+
+    #[test]
+    fn a_held_border_is_released_even_when_the_focus_report_never_matches() {
+        // The recorded bug: focus moved to a Helium window in a group but the border never appeared, because the
+        // real focus report never named that window and the shown border was held back forever.
+        let (_apps, mut reactor, space, log) = plain_slot_and_stacked_group(true);
+        focus(&mut reactor, space, 1);
+        land(&mut reactor, 1);
+        run(&mut reactor, LayoutCommand::NextSlot);
+        land(&mut reactor, 3);
+        run(&mut reactor, LayoutCommand::NextSlot);
+        // Back on the plain slot: held, and no report ever lands on window 1.
+        assert_eq!(last_shown(&log), Some(false));
+        reactor.handle_event(Event::BordersRefresh);
+        assert_eq!(last_shown(&log), Some(true), "the timer releases the held border");
+    }
+
+    #[test]
+    fn many_events_with_the_same_decision_send_nothing_more() {
+        // Several full messages during one focus move made JankyBorders redraw late; it now gets one per change.
+        let (_apps, mut reactor, space, log) = plain_slot_and_stacked_group(true);
+        focus(&mut reactor, space, 1);
+        land(&mut reactor, 1);
+        let before = log.lock().unwrap().sent.len();
+        for _ in 0..10 {
+            land(&mut reactor, 1);
+        }
+        let sent_now = log.lock().unwrap().sent.clone();
+        assert_eq!(sent_now.len(), before, "ten repeated events sent {sent_now:?}");
+        // The next change sends exactly one colours-only message.
+        run(&mut reactor, LayoutCommand::NextSlot);
+        let sent = log.lock().unwrap().sent.clone();
+        assert_eq!(sent.len(), before + 1);
+        assert_eq!(sent.last().unwrap(), &["active_color=0x00000000".to_string(), "inactive_color=0x00000000".to_string()]);
     }
 }

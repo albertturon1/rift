@@ -589,6 +589,7 @@ fn typed_collections_keep_source_aliases_and_inline_commands() {
                 ..Default::default()
             });
             source.virtual_workspaces.workspace_rules.push(WorkspaceLayoutRule {
+                stacked_root: None,
                 workspace: WorkspaceSelector::Index(1),
                 layout: Some(LayoutMode::Scrolling),
                 display: None,
@@ -677,11 +678,13 @@ fn workspace_resize_cleans_removed_assignments_and_preserves_valid_rules() {
     settings.default_workspace = 2;
     settings.workspace_rules = vec![
         WorkspaceLayoutRule {
+            stacked_root: None,
             workspace: WorkspaceSelector::Name("three".into()),
             layout: Some(LayoutMode::Stack),
             display: None,
         },
         WorkspaceLayoutRule {
+            stacked_root: None,
             workspace: WorkspaceSelector::Index(0),
             layout: Some(LayoutMode::Bsp),
             display: None,
@@ -1113,4 +1116,77 @@ fn replacing_shortcuts_is_atomic_and_scoped_to_the_reviewed_mode() {
     let reopened = ConfigDocument::parse(&edited.document.to_string()).unwrap().source().unwrap();
     assert_eq!(reopened.keys, source.keys);
     assert_eq!(reopened.binding_modes, source.binding_modes);
+}
+
+#[test]
+fn a_workspace_rule_with_only_stacked_root_is_valid() {
+    let rule = |stacked_root| WorkspaceLayoutRule {
+        workspace: WorkspaceSelector::Name("Q".into()),
+        layout: None,
+        stacked_root,
+        display: None,
+    };
+    let issues = |rule| {
+        VirtualWorkspaceSettings { workspace_rules: vec![rule], ..VirtualWorkspaceSettings::default() }
+            .validate()
+    };
+    assert!(issues(rule(Some(true))).iter().all(|issue| !issue.contains("Workspace rule 0")));
+    assert!(issues(rule(None)).iter().any(|issue| issue.contains("Workspace rule 0")));
+}
+
+
+#[test]
+fn borders_are_off_by_default_and_a_table_turns_them_on() {
+    let defaults: BordersSettings = toml::from_str("").unwrap();
+    assert!(!defaults.enabled);
+    assert!(defaults.hide_in_stack);
+    assert_eq!(defaults.min_visible_windows, 2);
+    assert!(defaults.validate().is_empty());
+    let custom: BordersSettings = toml::from_str(
+        r#"
+        enabled = true
+        width = 6.0
+        style = "square"
+        active_color = "0xffaa0000"
+        hide_in_stack = false
+        "#,
+    )
+    .unwrap();
+    assert!(custom.enabled && !custom.hide_in_stack);
+    assert_eq!(
+        custom.arguments(true),
+        ["style=square", "width=6.0", "active_color=0xffaa0000", "inactive_color=0x00000000"]
+    );
+    assert!(toml::from_str::<BordersSettings>("colour = 1").is_err(), "unknown keys are rejected");
+}
+
+#[test]
+fn hiding_the_border_only_makes_both_colours_transparent() {
+    assert_eq!(
+        BordersSettings::default().arguments(false),
+        ["active_color=0x00000000", "inactive_color=0x00000000"]
+    );
+}
+
+#[test]
+fn bad_border_settings_are_reported() {
+    let bad = BordersSettings {
+        width: 0.0,
+        active_color: "red".to_string(),
+        inactive_color: "0x1234".to_string(),
+        style: "two words".to_string(),
+        ..BordersSettings::default()
+    };
+    assert_eq!(bad.validate().len(), 4, "{:?}", bad.validate());
+}
+
+/// Loads the config file named by `RIFT_CONFIG_UNDER_TEST` the way the window manager does. Run by hand before
+/// switching a running Rift to a new config: `RIFT_CONFIG_UNDER_TEST=path cargo test --lib live_config -- --ignored`.
+#[test]
+#[ignore = "reads a config file named by an environment variable"]
+fn live_config_loads_and_validates() {
+    let path = PathBuf::from(std::env::var("RIFT_CONFIG_UNDER_TEST").expect("set RIFT_CONFIG_UNDER_TEST"));
+    let config = Config::read(&path).unwrap_or_else(|error| panic!("{}: {error:#}", path.display()));
+    assert!(config.settings.borders.enabled);
+    assert!(config.validate().is_empty(), "{:?}", config.validate());
 }

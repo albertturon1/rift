@@ -1,5 +1,7 @@
 pub mod engine;
 mod floating;
+pub(crate) mod border_rule;
+pub(crate) mod group_nav;
 pub(crate) mod graph;
 pub mod systems;
 pub mod utils;

@@ -119,6 +119,11 @@ pub struct WorkspaceLayoutRule {
     pub workspace: WorkspaceSelector,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<LayoutMode>,
+    /// Start the workspace with a stacked (accordion) root container in traditional mode, like AeroSpace's
+    /// `layout --root h_accordion`. Unlike `layout = "stack"` the tree stays a traditional tree, so groups
+    /// can still be joined. Only applies when the workspace is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stacked_root: Option<bool>,
     /// Ordered display UUIDs, names, or builtin/left/right/top/bottom selectors.
     /// The first eligible preference wins. Only applies when
     /// `mode = "global"`.
@@ -287,8 +292,10 @@ impl VirtualWorkspaceSettings {
         }
 
         for (index, rule) in self.workspace_rules.iter().enumerate() {
-            if rule.layout.is_none() && rule.display.is_none() {
-                issues.push(format!("Workspace rule {index} has no layout or display"));
+            if rule.layout.is_none() && rule.display.is_none() && rule.stacked_root.is_none() {
+                issues.push(format!(
+                    "Workspace rule {index} has no layout, display or stacked_root"
+                ));
             }
             if let Some(preferences) = &rule.display
                 && (preferences.is_empty()
@@ -567,6 +574,9 @@ pub struct Settings {
     #[serde(default)]
     #[setting(ignore)]
     pub ui: UiSettings,
+    #[serde(default)]
+    #[setting(ignore)]
+    pub borders: BordersSettings,
     /// Trackpad gesture settings
     #[serde(default)]
     #[setting(ignore)]
@@ -602,6 +612,107 @@ pub struct Settings {
 pub enum HorizontalMouseWarp {
     TopToBottom,
     BottomToTop,
+}
+
+/// The border JankyBorders draws around the focused window, driven by Rift itself.
+///
+/// With `enabled`, Rift decides on every layout or focus change whether the border is drawn and tells JankyBorders
+/// before the focus actually moves, so the border never flashes the wrong state. The rule is AeroSpace's: hidden when
+/// the focused window is inside a stack, or when fewer than `min_visible_windows` windows are on screen.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct BordersSettings {
+    /// Let Rift drive JankyBorders (it is started when it is not running).
+    #[serde(default)]
+    pub enabled: bool,
+    /// JankyBorders `style`, for example `round` or `square`.
+    #[serde(default = "default_border_style")]
+    pub style: String,
+    #[serde(default = "default_border_width")]
+    pub width: f64,
+    /// Border colour of the focused window as `0xAARRGGBB`.
+    #[serde(default = "default_border_active_color")]
+    pub active_color: String,
+    /// Border colour of the other windows as `0xAARRGGBB`; the default is transparent.
+    #[serde(default = "default_border_inactive_color")]
+    pub inactive_color: String,
+    /// Hide the border while the focused window is inside a stack.
+    #[serde(default = "yes")]
+    pub hide_in_stack: bool,
+    /// Hide the border while fewer than this many windows are on screen.
+    #[serde(default = "default_border_min_visible_windows")]
+    pub min_visible_windows: usize,
+    /// Path of the `borders` program; by default the Homebrew locations, then `PATH`.
+    #[serde(default)]
+    pub binary: Option<String>,
+}
+
+fn default_border_style() -> String { "round".to_string() }
+fn default_border_width() -> f64 { 8.0 }
+fn default_border_active_color() -> String { "0xff4fa84f".to_string() }
+fn default_border_inactive_color() -> String { "0x00000000".to_string() }
+fn default_border_min_visible_windows() -> usize { 2 }
+
+impl Default for BordersSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            style: default_border_style(),
+            width: default_border_width(),
+            active_color: default_border_active_color(),
+            inactive_color: default_border_inactive_color(),
+            hide_in_stack: true,
+            min_visible_windows: default_border_min_visible_windows(),
+            binary: None,
+        }
+    }
+}
+
+impl BordersSettings {
+    /// The JankyBorders arguments for a shown or a hidden border. Hiding only makes both colours transparent, so
+    /// the style and width stay as they were.
+    pub fn arguments(&self, show: bool) -> Vec<String> {
+        if show {
+            vec![
+                format!("style={}", self.style),
+                format!("width={:.1}", self.width),
+                format!("active_color={}", self.active_color),
+                format!("inactive_color={}", self.inactive_color),
+            ]
+        } else {
+            vec!["active_color=0x00000000".to_string(), "inactive_color=0x00000000".to_string()]
+        }
+    }
+
+    /// Only the colours of a shown or hidden border: what changes between the two states. Style and width are sent
+    /// once with [`Self::arguments`]; sending them again makes JankyBorders rebuild its borders for nothing.
+    pub fn colors(&self, show: bool) -> Vec<String> {
+        if show {
+            vec![
+                format!("active_color={}", self.active_color),
+                format!("inactive_color={}", self.inactive_color),
+            ]
+        } else {
+            vec!["active_color=0x00000000".to_string(), "inactive_color=0x00000000".to_string()]
+        }
+    }
+
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        if !(self.width.is_finite() && self.width > 0.0) {
+            issues.push(format!("borders.width must be positive, got {}", self.width));
+        }
+        for (name, value) in [("active_color", &self.active_color), ("inactive_color", &self.inactive_color)] {
+            let digits = value.strip_prefix("0x").unwrap_or("");
+            if digits.len() != 8 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+                issues.push(format!("borders.{name} must look like 0xAARRGGBB, got {value:?}"));
+            }
+        }
+        if self.style.is_empty() || self.style.contains(char::is_whitespace) {
+            issues.push(format!("borders.style must be one word, got {:?}", self.style));
+        }
+        issues
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
@@ -1573,6 +1684,7 @@ impl Settings {
 
         issues.extend(self.layout.validate());
         issues.extend(self.ui.stack_line.validate());
+        issues.extend(self.borders.validate());
 
         if !(0.10..=0.45).contains(&self.drag_drop.drop_zone_fraction) {
             issues.push(format!(

@@ -182,8 +182,17 @@ fn default_layout_system_kind() -> LayoutSystemKind {
 }
 
 impl VirtualWorkspace {
-    fn new(name: String, space: SpaceId, mode: LayoutMode, settings: &LayoutSettings) -> Self {
-        let layout_system = Self::create_layout_system(mode, settings);
+    fn new(
+        name: String,
+        space: SpaceId,
+        mode: LayoutMode,
+        settings: &LayoutSettings,
+        stacked_root: Option<crate::layout_engine::LayoutKind>,
+    ) -> Self {
+        let mut layout_system = Self::create_layout_system(mode, settings);
+        if let LayoutSystemKind::Traditional(system) = &mut layout_system {
+            system.set_stacked_root(stacked_root);
+        }
         Self {
             name,
             space,
@@ -822,7 +831,10 @@ impl WorkspaceStore {
         let size = self
             .workspaces_on(space)
             .find_map(|id| self.workspaces[id].layout_state.active_size());
-        let mut workspace = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
+        let index = self.scope_ids(space).count();
+        let stacked_root = self.stacked_root_for_workspace(index, &name);
+        let mut workspace =
+            VirtualWorkspace::new(name, space, mode, &self.layout_settings, stacked_root);
         workspace.preferred_display = self
             .workspaces
             .values()
@@ -952,6 +964,23 @@ impl WorkspaceStore {
             .iter()
             .rev()
             .filter(move |rule| selector_matches(&rule.workspace, index, name))
+    }
+
+    /// The stacked root kind a workspace starts with, when a rule asks for one.
+    pub(crate) fn stacked_root_for_workspace(
+        &self,
+        index: usize,
+        name: &str,
+    ) -> Option<crate::layout_engine::LayoutKind> {
+        use crate::common::config::StackDefaultOrientation;
+        use crate::layout_engine::LayoutKind;
+        self.matching_rules(index, name)
+            .find_map(|rule| rule.stacked_root)
+            .filter(|stacked| *stacked)
+            .map(|_| match self.layout_settings.stack.default_orientation {
+                StackDefaultOrientation::Vertical => LayoutKind::VerticalStack,
+                _ => LayoutKind::HorizontalStack,
+            })
     }
 
     pub(crate) fn resolve_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
@@ -2766,4 +2795,32 @@ mod tests {
         assert_eq!(hidden.origin.y, primary.max().y - 1.0);
         assert_eq!(hidden.origin.x, primary.origin.x - frame.size.width + 1.0);
     }
+
+    #[test]
+    fn stacked_root_rule_starts_only_the_named_workspace_with_a_stacked_root() {
+        use crate::common::config::WorkspaceSelector;
+        use crate::layout_engine::LayoutKind;
+
+        let settings = VirtualWorkspaceSettings {
+            workspace_rules: vec![WorkspaceLayoutRule {
+                stacked_root: Some(true),
+                workspace: WorkspaceSelector::Name("Q".to_string()),
+                layout: None,
+                display: None,
+            }],
+            ..VirtualWorkspaceSettings::default()
+        };
+        let mut manager = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
+        let space = SpaceId::new(1);
+        let plain = manager.create_workspace(space, Some("P".to_string())).unwrap();
+        let stacked = manager.create_workspace(space, Some("Q".to_string())).unwrap();
+        let root_kind = |manager: &mut WorkspaceStore, id| {
+            manager[id].ensure_layout_for_size(CGSize::new(1200.0, 800.0));
+            let layout = manager[id].active_layout().unwrap();
+            manager[id].layout_system.container_tree(layout).layout_kind
+        };
+        assert_eq!(root_kind(&mut manager, stacked), Some(LayoutKind::HorizontalStack));
+        assert_eq!(root_kind(&mut manager, plain), Some(LayoutKind::Horizontal));
+    }
+
 }

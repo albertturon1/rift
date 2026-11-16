@@ -266,6 +266,20 @@ distance_pct = 0.08
 # Haptic feedback on swipe
 haptics_enabled = true
 
+[settings.borders]
+# Let Rift drive JankyBorders (`brew install FelixKratz/formulae/borders`): it is started when it is not running and told
+# whether to draw the border before focus moves, so the border never flashes the wrong state.
+enabled = false
+style = "round"
+width = 8.0
+# Colours are 0xAARRGGBB.
+active_color = "0xff4fa84f"
+inactive_color = "0x00000000"
+# Hide the border while the focused window is in a stack, or while fewer windows than this are on screen.
+hide_in_stack = true
+min_visible_windows = 2
+# binary = "/opt/homebrew/bin/borders"
+
 # Mouse move and tiled-window drop behavior
 [settings.drag_drop]
 # Disable to leave all mouse gestures entirely to macOS and applications.

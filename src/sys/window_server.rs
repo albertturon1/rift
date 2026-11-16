@@ -437,12 +437,21 @@ pub fn window_is_sticky(id: WindowServerId) -> bool {
 }
 
 pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
+    // Tests never ask the real window server: their made-up window ids can equal the id of a window on the
+    // machine running them (the Ghostty window with id 111 broke six tests), so only an override answers.
     #[cfg(test)]
-    if let Some(override_spaces) =
-        TEST_WINDOW_SPACES_OVERRIDE.with(|spaces| spaces.borrow().get(&id.as_u32()).cloned())
-    {
-        return override_spaces.into_iter().map(crate::sys::screen::SpaceId::new).collect();
-    }
+    return TEST_WINDOW_SPACES_OVERRIDE
+        .with(|spaces| spaces.borrow().get(&id.as_u32()).cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .map(crate::sys::screen::SpaceId::new)
+        .collect();
+    #[cfg(not(test))]
+    window_spaces_from_server(id)
+}
+
+#[cfg(not(test))]
+fn window_spaces_from_server(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
 
     let cf_windows = cf_array_from_ids(&[id]);
     let space_list_ref = unsafe {
@@ -477,12 +486,16 @@ pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
 }
 
 pub fn window_ordered_in(id: WindowServerId) -> Option<bool> {
+    // Hermetic in tests, like `window_spaces`: without an override a made-up id is not ordered in or out.
     #[cfg(test)]
-    if let Some(ordered) = TEST_WINDOW_ORDERED_IN_OVERRIDE
-        .with(|override_ordered| override_ordered.borrow().get(&id.as_u32()).copied())
-    {
-        return Some(ordered);
-    }
+    return TEST_WINDOW_ORDERED_IN_OVERRIDE
+        .with(|override_ordered| override_ordered.borrow().get(&id.as_u32()).copied());
+    #[cfg(not(test))]
+    window_ordered_in_from_server(id)
+}
+
+#[cfg(not(test))]
+fn window_ordered_in_from_server(id: WindowServerId) -> Option<bool> {
 
     let mut ordered: u8 = 0;
     if let Ok(_) = cg_ok(unsafe { SLSWindowIsOrderedIn(*G_CONNECTION, id.as_u32(), &mut ordered) })
